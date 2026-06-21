@@ -46,6 +46,18 @@ jobs:
             fi
           fi
 
+      - name: Clean and Restore Gradle Wrapper
+        run: |
+          echo "Cleaning up possibly corrupted wrapper jar..."
+          rm -f gradle/wrapper/gradle-wrapper.jar
+          
+          echo "Downloading authentic, clean Gradle Wrapper jar from Gradle's official repository..."
+          mkdir -p gradle/wrapper
+          curl -sSLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar || {
+            echo "Direct download failed. Falling back to local gradle wizard..."
+            gradle wrapper --gradle-version 9.3.1
+          }
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
