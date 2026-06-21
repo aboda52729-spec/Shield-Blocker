@@ -1,0 +1,6 @@
+{
+  "name": "Shield Blocker",
+  "description": "An offline, local anti-pornography blocker. Set a shield timer to immediately close inappropriate tabs locally with accessibility. Supports both Arabic and English.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

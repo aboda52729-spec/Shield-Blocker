@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Shield Blocker</string>
+    <string name="accessibility_description">Shield Blocker uses this service to scan browser URLs and screen text to block access to adult or inappropriate content locally and offline.</string>
+</resources>
