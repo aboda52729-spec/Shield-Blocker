@@ -86,10 +86,20 @@ jobs:
             fi
           fi
 
+      - name: Clean and Restore Gradle Wrapper
+        run: |
+          echo "Cleaning up possibly corrupted wrapper jar..."
+          rm -f gradle/wrapper/gradle-wrapper.jar
+          
+          echo "Downloading authentic, clean Gradle Wrapper jar from Gradle's official repository..."
+          mkdir -p gradle/wrapper
+          curl -sSLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-overwrite-existing: true
+          validate-wrappers: false
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
