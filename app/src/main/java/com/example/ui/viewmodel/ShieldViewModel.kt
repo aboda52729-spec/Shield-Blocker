@@ -36,6 +36,9 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
     private val _adminLockRemainingMs = MutableStateFlow(0L)
     val adminLockRemainingMs = _adminLockRemainingMs.asStateFlow()
 
+    private val _strictMonthRemainingMs = MutableStateFlow(0L)
+    val strictMonthRemainingMs = _strictMonthRemainingMs.asStateFlow()
+
     private val _activeStrings = MutableStateFlow(LocalizedStrings.English)
     val activeStrings = _activeStrings.asStateFlow()
 
@@ -44,6 +47,7 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
 
     private var shieldCountdownJob: Job? = null
     private var adminLockCountdownJob: Job? = null
+    private var strictMonthCountdownJob: Job? = null
 
     init {
         val dao = ShieldDatabase.getDatabase(application).shieldDao()
@@ -77,6 +81,7 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
 
                     manageShieldCountdown(settings)
                     manageAdminLockCountdown(settings)
+                    manageStrictMonthCountdown(settings)
                 }
             }
         }
@@ -108,9 +113,12 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
                     if (remaining <= 0) {
                         _timerRemainingMs.value = 0L
                         withContext(Dispatchers.IO) {
-                            repository.updateSettings(
-                                settings.copy(isShieldActive = false, shieldEndTimestampMs = 0L)
-                            )
+                            val current = repository.getSettings()
+                            if (!(current.isStrictMonthActive && current.strictMonthEndTimestampMs > System.currentTimeMillis())) {
+                                repository.updateSettings(
+                                    current.copy(isShieldActive = false, shieldEndTimestampMs = 0L)
+                                )
+                            }
                         }
                         break
                     } else {
@@ -134,9 +142,12 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
                     if (remaining <= 0) {
                         _adminLockRemainingMs.value = 0L
                         withContext(Dispatchers.IO) {
-                            repository.updateSettings(
-                                settings.copy(isAdminLockActive = false, adminLockEndTimestampMs = 0L, adminLockDurationDays = 0)
-                            )
+                            val current = repository.getSettings()
+                            if (!(current.isStrictMonthActive && current.strictMonthEndTimestampMs > System.currentTimeMillis())) {
+                                repository.updateSettings(
+                                    current.copy(isAdminLockActive = false, adminLockEndTimestampMs = 0L, adminLockDurationDays = 0)
+                                )
+                            }
                         }
                         break
                     } else {
@@ -147,6 +158,33 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
             }
         } else {
             _adminLockRemainingMs.value = 0L
+        }
+    }
+
+    private fun manageStrictMonthCountdown(settings: ShieldSettings) {
+        strictMonthCountdownJob?.cancel()
+        if (settings.isStrictMonthActive) {
+            strictMonthCountdownJob = viewModelScope.launch(Dispatchers.Default) {
+                while (isActive) {
+                    val now = System.currentTimeMillis()
+                    val remaining = settings.strictMonthEndTimestampMs - now
+                    if (remaining <= 0) {
+                        _strictMonthRemainingMs.value = 0L
+                        withContext(Dispatchers.IO) {
+                            val current = repository.getSettings()
+                            repository.updateSettings(
+                                current.copy(isStrictMonthActive = false, strictMonthEndTimestampMs = 0L)
+                            )
+                        }
+                        break
+                    } else {
+                        _strictMonthRemainingMs.value = remaining
+                    }
+                    delay(1000)
+                }
+            }
+        } else {
+            _strictMonthRemainingMs.value = 0L
         }
     }
 
@@ -174,8 +212,34 @@ class ShieldViewModel(application: Application) : AndroidViewModel(application) 
     fun deactivateShield() {
         viewModelScope.launch(Dispatchers.IO) {
             val settings = repository.getSettings()
+            val now = System.currentTimeMillis()
+            if (settings.isStrictMonthActive && settings.strictMonthEndTimestampMs > now) {
+                // Manual deactivation is strictly forbidden
+                return@launch
+            }
+            if (!settings.isShieldActive || settings.shieldEndTimestampMs <= now) {
+                repository.updateSettings(
+                    settings.copy(isShieldActive = false, shieldEndTimestampMs = 0L)
+                )
+            }
+        }
+    }
+
+    fun activateStrictMonth() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val settings = repository.getSettings()
+            val durationMs = 30L * 24 * 60 * 60 * 1000L
+            val endTimestamp = System.currentTimeMillis() + durationMs
             repository.updateSettings(
-                settings.copy(isShieldActive = false, shieldEndTimestampMs = 0L)
+                settings.copy(
+                    isShieldActive = true,
+                    shieldEndTimestampMs = maxOf(settings.shieldEndTimestampMs, endTimestamp),
+                    isAdminLockActive = true,
+                    adminLockEndTimestampMs = maxOf(settings.adminLockEndTimestampMs, endTimestamp),
+                    adminLockDurationDays = maxOf(settings.adminLockDurationDays, 30),
+                    isStrictMonthActive = true,
+                    strictMonthEndTimestampMs = endTimestamp
+                )
             )
         }
     }

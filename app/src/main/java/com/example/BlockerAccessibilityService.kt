@@ -1,7 +1,9 @@
 package com.example
 
 import android.accessibilityservice.AccessibilityService
+import android.app.ActivityManager
 import android.app.NotificationChannel
+import android.net.Uri
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -25,6 +27,25 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var activeSettings: ShieldSettings? = null
     private var lastBlockedTime = 0L
 
+    private lateinit var ourPackageName: String
+    private lateinit var ourPackageNameLower: String
+
+    @Volatile
+    private var blockRegex: Regex? = null
+    @Volatile
+    private var exemptRegex: Regex? = null
+
+    // Package-aware content scanning throttle to avoid chocking the main thread
+    private val lastContentScanMap = HashMap<String, Long>()
+
+    override fun onCreate() {
+        super.onCreate()
+        ourPackageName = packageName
+        ourPackageNameLower = packageName.lowercase()
+        // Pre-compile patterns with defaults so the protection matches instantly from millisecond zero
+        updatePatterns(ShieldSettings())
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         isServiceRunning = true
@@ -35,6 +56,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         serviceScope.launch {
             repository.settingsFlow.collect { settings ->
                 activeSettings = settings
+                updatePatterns(settings)
             }
         }
         createNotificationChannel()
@@ -46,10 +68,52 @@ class BlockerAccessibilityService : AccessibilityService() {
         instance = null
     }
 
+    private fun updatePatterns(settings: ShieldSettings?) {
+        val baseKeywords = listOf(
+            "porn", "naked", "adult", "xvid", "xnxx", "sex", "hardcore", "xxx", "erotic", "hentai",
+            "إباحي", "جنس", "سكس", "بورن", "مواقع إباحية", "موقع جنسي", "مخانيث"
+        )
+        val keywordsList = mutableListOf<String>()
+        keywordsList.addAll(baseKeywords)
+
+        if (settings != null && settings.customKeywords.isNotEmpty()) {
+            val customs = settings.customKeywords.split(",")
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+            keywordsList.addAll(customs)
+        }
+
+        try {
+            val blockPatternString = keywordsList
+                .filter { it.isNotEmpty() }
+                .joinToString("|") { Regex.escape(it) }
+            blockRegex = if (blockPatternString.isNotEmpty()) {
+                Regex(blockPatternString, RegexOption.IGNORE_CASE)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            val exemptPatternString = academicKeywords
+                .filter { it.isNotEmpty() }
+                .joinToString("|") { Regex.escape(it) }
+            exemptRegex = if (exemptPatternString.isNotEmpty()) {
+                Regex(exemptPatternString, RegexOption.IGNORE_CASE)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun isPackageWhitelisted(pkg: String): Boolean {
         if (pkg.isEmpty()) return false
         val lowerPkg = pkg.lowercase()
-        return lowerPkg == packageName.lowercase() ||
+        return lowerPkg == ourPackageNameLower ||
                lowerPkg == "com.android.systemui" ||
                lowerPkg == "com.google.android.packageinstaller" ||
                lowerPkg == "com.android.packageinstaller" ||
@@ -79,7 +143,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                lowerPkg == "com.bumble.app" || // Bumble
                lowerPkg == "net.lovoo.android" || // Lovoo
                lowerPkg == "com.okcupid.okcupid" // OkCupid
-               // Note: Excluded messenger-only apps (WhatsApp, Telegram, Messenger)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -96,36 +159,172 @@ class BlockerAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         val settings = activeSettings
 
-        // 1. SECURE UNINSTALL LOCK DETECTION
-        val isAdminLocked = settings?.isAdminLockActive == true && now < settings.adminLockEndTimestampMs
-        if (isAdminLocked && (eventPkg == "com.android.settings" || eventPkg == "com.google.android.packageinstaller" || eventPkg == "com.android.packageinstaller")) {
-            val rootNode = rootInActiveWindow
-            if (rootNode != null) {
-                val targets = listOf("com.example", "shield blocker", "درع الحماية", "حاجب الدروع", "shield device protections")
-                if (hasNodeWithText(rootNode, targets)) {
-                    rootNode.recycle()
-                    // Instantly bounce home
-                    performBlockRedirect()
-                    // Launch app instantly to cover Settings and reset states
-                    try {
-                        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-                        launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                        if (launchIntent != null) {
-                            startActivity(launchIntent)
-                        }
-                    } catch (e: Exception) {}
-                    return
-                }
-                rootNode.recycle()
-            }
-        }
-
-        // Standard Whitelist filtering for normal browsing scans
-        if (isPackageWhitelisted(eventPkg) || eventPkg == "com.android.settings") {
+        // Optimization 1: Skip checks for our own app immediately using simple string matching to prevent self-closing
+        val lowerEventPkg = eventPkg.lowercase()
+        val isOurAppEventPkg = lowerEventPkg.isNotEmpty() && (
+            lowerEventPkg == ourPackageNameLower ||
+            lowerEventPkg.startsWith("com.aistudio.shieldblocker") ||
+            lowerEventPkg.contains("shieldblocker") ||
+            lowerEventPkg.startsWith("com.example")
+        )
+        if (isOurAppEventPkg) {
             return
         }
 
-        // Verify active root
+        // Optimization 2: Fast whitelist verification to skip checks for common safe apps instantly
+        if (isPackageWhitelisted(eventPkg)) {
+            return
+        }
+
+        // Optimization 3: Rate limit TYPE_WINDOW_CONTENT_CHANGED to once per 100ms per package to prevent rendering choking.
+        // On TYPE_WINDOW_STATE_CHANGED (app focus swap), we reset the timer to scan instantly.
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            lastContentScanMap.remove(eventPkg)
+        } else {
+            val lastScan = lastContentScanMap[eventPkg] ?: 0L
+            if (now - lastScan < CONTENT_SCAN_DELAY_MS) {
+                return
+            }
+            lastContentScanMap[eventPkg] = now
+        }
+
+        // Lazy active window checker to avoid slow cross-process rootInActiveWindow queries
+        var isOurAppActiveResult: Boolean? = null
+        fun checkIfOurAppIsActive(): Boolean {
+            if (isOurAppActiveResult != null) return isOurAppActiveResult!!
+            val activeRootPkg = try {
+                val root = rootInActiveWindow
+                val p = root?.packageName?.toString()?.lowercase() ?: ""
+                root?.recycle()
+                p
+            } catch (e: Exception) {
+                ""
+            }
+            isOurAppActiveResult = activeRootPkg.isNotEmpty() && (
+                activeRootPkg == ourPackageNameLower ||
+                activeRootPkg.startsWith("com.aistudio.shieldblocker") ||
+                activeRootPkg.contains("shieldblocker") ||
+                activeRootPkg.startsWith("com.example")
+            )
+            return isOurAppActiveResult!!
+        }
+
+        // 1. SECURE UNINSTALL LOCK DETECTION
+        val isAdminLocked = (settings?.isAdminLockActive == true && now < settings.adminLockEndTimestampMs) ||
+                (settings?.isStrictMonthActive == true && now < settings.strictMonthEndTimestampMs)
+        val isUninstallOrSettingsPkg = lowerEventPkg != ourPackageNameLower && (
+                lowerEventPkg.contains("settings") ||
+                lowerEventPkg.contains("packageinstaller") ||
+                lowerEventPkg.contains("permissioncontroller") ||
+                lowerEventPkg.contains("securitycenter") ||
+                lowerEventPkg.contains("systemmanager") ||
+                lowerEventPkg.contains("uninstaller") ||
+                lowerEventPkg.contains("deviceadmin") ||
+                lowerEventPkg == "android" ||
+                lowerEventPkg == "com.android.systemui"
+        )
+
+        // Only block settings/installer package if the lock is active AND our app isn't active
+        if (isAdminLocked && isUninstallOrSettingsPkg) {
+            if (checkIfOurAppIsActive()) {
+                return
+            }
+
+            val targets = listOf(
+                ourPackageNameLower,
+                "com.example",
+                "shield blocker",
+                "shield blocker service",
+                "shield device protections",
+                "حاجب الدروع",
+                "درع الحماية",
+                "حماية الحذف",
+                "حماية مشرف الجهاز"
+            )
+
+            val actions = listOf(
+                "uninstall",
+                "force stop",
+                "deactivate",
+                "disable",
+                "clear data",
+                "storage & cache",
+                "app info",
+                "device admin",
+                "use service",
+                "use shield",
+                "shortcut",
+                "turn off",
+                "إلغاء التثبيت",
+                "إلغاء تثبيت",
+                "إلغاء تفعيل",
+                "إلغاء تنشيط",
+                "إيقاف إجباري",
+                "فرض الإيقاف",
+                "معلومات التطبيق",
+                "مسح البيانات",
+                "مشرف الجهاز",
+                "إيقاف الخدمة",
+                "ايقاف الخدمة",
+                "استخدم درع",
+                "استخدام درع",
+                "تمكين",
+                "تعطيل"
+            )
+
+            var matched = false
+
+            val eventSource = event.source
+            if (eventSource != null) {
+                if (scanWindowForBlock(eventSource, targets, actions)) {
+                    matched = true
+                }
+                eventSource.recycle()
+            }
+
+            if (!matched) {
+                val rootNode = rootInActiveWindow
+                if (rootNode != null) {
+                    if (scanWindowForBlock(rootNode, targets, actions)) {
+                        matched = true
+                    }
+                    rootNode.recycle()
+                }
+            }
+
+            if (!matched) {
+                try {
+                    val windowList = windows
+                    if (windowList.isNotEmpty()) {
+                        for (window in windowList) {
+                            val wRoot = window.root
+                            if (wRoot != null) {
+                                if (scanWindowForBlock(wRoot, targets, actions)) {
+                                    matched = true
+                                    wRoot.recycle()
+                                    break
+                                }
+                                wRoot.recycle()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+
+            if (matched) {
+                performBlockRedirect(eventPkg)
+                try {
+                    val launchIntent = packageManager.getLaunchIntentForPackage(ourPackageName)
+                    launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    if (launchIntent != null) {
+                        startActivity(launchIntent)
+                    }
+                } catch (e: Exception) {}
+                return
+            }
+        }
+
+        // Verify active root whitelisting before any deep content scanning
         val activeRoot = rootInActiveWindow
         if (activeRoot != null) {
             val activePkg = activeRoot.packageName?.toString() ?: ""
@@ -142,7 +341,8 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        val isShieldActiveDirect = currentSettings.isShieldActive && now < currentSettings.shieldEndTimestampMs
+        val isShieldActiveDirect = (currentSettings.isShieldActive && now < currentSettings.shieldEndTimestampMs) ||
+                (currentSettings.isStrictMonthActive && now < currentSettings.strictMonthEndTimestampMs)
         if (!isShieldActiveDirect) {
             source.recycle()
             return
@@ -152,7 +352,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (isPublicSocialMediaApp(eventPkg)) {
             if (now - lastBlockedTime > 2000) {
                 lastBlockedTime = now
-                performBlockRedirect()
+                performBlockRedirect(eventPkg)
                 val isAr = currentSettings.language == "ar"
                 val appName = getAppLabel(eventPkg)
                 val keyword = if (isAr) "تطبيق تواصل اجتماعي عام" else "Public Social Media"
@@ -162,27 +362,15 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Keywords list for scanning
-        val keywordsList = mutableListOf(
-            "porn", "naked", "adult", "xvid", "xnxx", "sex", "hardcore", "xxx", "erotic", "hentai",
-            "إباحي", "جنس", "سكس", "بورن", "مواقع إباحية", "موقع جنسي", "مخانيث"
-        )
-        if (currentSettings.customKeywords.isNotEmpty()) {
-            val customs = currentSettings.customKeywords.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-            keywordsList.addAll(customs)
-        }
-
-        // Robust O(N) scan using unified stack traversal
-        val violationKeyword = fastContentScan(source, keywordsList)
+        // Robust scan using pre-compiled regex directly matching CharSequence structures
+        val violationKeyword = fastContentScan(source)
         source.recycle()
 
         if (violationKeyword != null) {
-            // Prevent spamming
             if (now - lastBlockedTime > 5000) {
                 lastBlockedTime = now
                 try {
-                    // Instantly exit app to home
-                    performBlockRedirect()
+                    performBlockRedirect(eventPkg)
                     showBlockNotification(getAppLabel(eventPkg), violationKeyword)
                 } catch (e: Exception) {}
             }
@@ -196,67 +384,127 @@ class BlockerAccessibilityService : AccessibilityService() {
         "علمي", "أضرار", "علاج", "دراسة", "بحوث", "طبي", "جامعة", "أكاديمي", "أثر", "أضرار الإباحية", "مخاطر", "وقاية"
     )
 
-    private fun fastContentScan(root: AccessibilityNodeInfo?, negativeKeywords: List<String>): String? {
+    // Extremely fast, allocation-free recursive tree scan with native Regex engine matching on CharSequence
+    private fun fastContentScan(root: AccessibilityNodeInfo?): String? {
         if (root == null) return null
 
+        val localBlockRegex = blockRegex ?: return null
+        val localExemptRegex = exemptRegex
+
         val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.add(root)
+        stack.add(AccessibilityNodeInfo.obtain(root))
 
         var foundViolationKeyword: String? = null
         var isExempt = false
 
         while (stack.isNotEmpty()) {
             val node = stack.removeLast()
-            val text = node.text?.toString()?.lowercase() ?: ""
-            val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-            
-            // Check exemption first
-            if (!isExempt) {
-                if (academicKeywords.any { text.contains(it) || desc.contains(it) }) {
+            val nodePkg = node.packageName?.toString() ?: ""
+            if (nodePkg.isNotEmpty() && (
+                nodePkg.equals(ourPackageName, ignoreCase = true) ||
+                nodePkg.startsWith("com.aistudio.shieldblocker", ignoreCase = true) ||
+                nodePkg.contains("shieldblocker", ignoreCase = true) ||
+                nodePkg.startsWith("com.example", ignoreCase = true)
+            )) {
+                node.recycle()
+                continue
+            }
+
+            val text = node.text
+            val desc = node.contentDescription
+
+            // Fast Educational Exemption Check First
+            if (!isExempt && localExemptRegex != null) {
+                if ((text != null && localExemptRegex.containsMatchIn(text)) ||
+                    (desc != null && localExemptRegex.containsMatchIn(desc))
+                ) {
                     isExempt = true
-                    // If we find it's exempt, we can immediately stop scanning and return safe (null)
-                    break 
+                    node.recycle()
+                    break
                 }
             }
 
-            // Check violations if we haven't already found one
+            // Positive Match Blocking Scan
             if (foundViolationKeyword == null) {
-                val violation = negativeKeywords.firstOrNull { it.isNotEmpty() && (text.contains(it) || desc.contains(it)) }
-                if (violation != null) {
-                    foundViolationKeyword = violation
+                val match = if (text != null) localBlockRegex.find(text) else null
+                if (match != null) {
+                    foundViolationKeyword = match.value
+                } else {
+                    val descMatch = if (desc != null) localBlockRegex.find(desc) else null
+                    if (descMatch != null) {
+                        foundViolationKeyword = descMatch.value
+                    }
                 }
             }
 
-            // If we found a violation but haven't proven it's exempt yet, keep looking for an exemption.
-            // But if there's no more children, we'll exit anyway.
             for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { stack.add(it) }
+                node.getChild(i)?.let { child ->
+                    stack.add(child)
+                }
             }
+            node.recycle()
         }
 
-        // If it's exempt, then no violation. Else, return the violation if found.
+        // Guaranteed leak cleanup for any unvisited nodes on early breaks
+        while (stack.isNotEmpty()) {
+            stack.removeLast().recycle()
+        }
+
         return if (isExempt) null else foundViolationKeyword
     }
 
-    private fun hasNodeWithText(node: AccessibilityNodeInfo?, targets: List<String>): Boolean {
-        if (node == null) return false
-        val text = node.text?.toString()?.lowercase() ?: ""
-        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-        val viewId = node.viewIdResourceName?.lowercase() ?: ""
+    private fun scanWindowForBlock(root: AccessibilityNodeInfo?, targets: List<String>, actions: List<String>): Boolean {
+        if (root == null) return false
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(AccessibilityNodeInfo.obtain(root))
 
-        for (target in targets) {
-            if (text.contains(target) || desc.contains(target) || viewId.contains(target)) {
-                return true
+        var foundTarget = false
+        var foundAction = false
+
+        while (stack.isNotEmpty()) {
+            val node = stack.removeLast()
+            val nodePkg = node.packageName?.toString() ?: ""
+            if (nodePkg.isNotEmpty() && (
+                nodePkg.equals(ourPackageName, ignoreCase = true) ||
+                nodePkg.startsWith("com.aistudio.shieldblocker", ignoreCase = true) ||
+                nodePkg.contains("shieldblocker", ignoreCase = true) ||
+                nodePkg.startsWith("com.example", ignoreCase = true)
+            )) {
+                node.recycle()
+                continue
             }
+
+            if (!foundTarget || !foundAction) {
+                val text = node.text?.toString() ?: ""
+                val desc = node.contentDescription?.toString() ?: ""
+                val viewId = node.viewIdResourceName ?: ""
+
+                if (!foundTarget) {
+                    if (targets.any { text.contains(it, ignoreCase = true) || desc.contains(it, ignoreCase = true) || viewId.contains(it, ignoreCase = true) }) {
+                        foundTarget = true
+                    }
+                }
+
+                if (!foundAction) {
+                    if (actions.any { text.contains(it, ignoreCase = true) || desc.contains(it, ignoreCase = true) || viewId.contains(it, ignoreCase = true) }) {
+                        foundAction = true
+                    }
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { child ->
+                    stack.add(child)
+                }
+            }
+            node.recycle()
         }
 
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            val found = hasNodeWithText(child, targets)
-            child?.recycle()
-            if (found) return true
+        while (stack.isNotEmpty()) {
+            stack.removeLast().recycle()
         }
-        return false
+
+        return foundTarget && foundAction
     }
 
     private fun getAppLabel(packageName: String): String {
@@ -269,15 +517,57 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun performBlockRedirect() {
+    private fun performBlockRedirect(eventPkg: String = "") {
+        // 1. Force the target browser to open a blank page to clear the active address bar state and fragment session
+        if (eventPkg.isNotEmpty() && !isPackageWhitelisted(eventPkg)) {
+            val lowerPkg = eventPkg.lowercase()
+            if (lowerPkg.contains("chrome") || lowerPkg.contains("browser") || lowerPkg.contains("firefox") || lowerPkg.contains("opera") || lowerPkg.contains("sbrowser")) {
+                try {
+                    val blankIntent = Intent(Intent.ACTION_VIEW, Uri.parse("about:blank")).apply {
+                        `package` = eventPkg
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                    startActivity(blankIntent)
+                } catch (e: Exception) {
+                    try {
+                        val generalIntent = Intent(Intent.ACTION_VIEW, Uri.parse("about:blank")).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        startActivity(generalIntent)
+                    } catch (ex: Exception) {}
+                }
+            }
+        }
+
+        // 2. Send double back action to disrupt resumed tab state and go back in history
+        if (eventPkg.isNotEmpty() && !isPackageWhitelisted(eventPkg)) {
+            try {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            } catch (e: Exception) {
+                // Ignore backup issues
+            }
+        }
+
+        // 3. Perform main redirect to safety on the home screen
         performGlobalAction(GLOBAL_ACTION_HOME)
+
+        // 4. Force-kill the background process of the app to invalidate its running transient RAM cache
+        if (eventPkg.isNotEmpty() && !isPackageWhitelisted(eventPkg)) {
+            try {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                am.killBackgroundProcesses(eventPkg)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Shield Blocker Notifications",
+                "SecureShield Notifications",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Used to warn about inappropriate page closures."
@@ -318,6 +608,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        const val CONTENT_SCAN_DELAY_MS = 100L
         const val CHANNEL_ID = "shield_blocker_channel"
         const val BLOCK_NOTIF_ID = 2026
         var isServiceRunning = false

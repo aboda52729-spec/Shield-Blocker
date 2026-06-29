@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,7 +65,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -103,6 +107,7 @@ fun ShieldApp(viewModel: ShieldViewModel) {
     val isDeviceAdminEnabled by viewModel.isDeviceAdminEnabled.collectAsState()
     val remainingMs by viewModel.timerRemainingMs.collectAsState()
     val adminRemainingMs by viewModel.adminLockRemainingMs.collectAsState()
+    val strictRemainingMs by viewModel.strictMonthRemainingMs.collectAsState()
     val currentLang by viewModel.currentLanguage.collectAsState()
 
     var selectedTab by remember { mutableStateOf(0) }
@@ -185,10 +190,10 @@ fun ShieldApp(viewModel: ShieldViewModel) {
             bottomBar = {
                 Card(
                     modifier = Modifier
+                        .navigationBarsPadding()
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                         .fillMaxWidth()
-                        .height(72.dp)
-                        .navigationBarsPadding(),
+                        .height(72.dp),
                     shape = RoundedCornerShape(24.dp),
                     colors = CardDefaults.cardColors(containerColor = ElegantCardBg.copy(alpha = 0.95f)),
                     border = BorderStroke(1.dp, ElegantBorder),
@@ -201,6 +206,7 @@ fun ShieldApp(viewModel: ShieldViewModel) {
                     ) {
                         val items = listOf(
                             NavigationItem(strings.tabGuard, Icons.Default.Lock, "tab_guard_button"),
+                            NavigationItem(strings.tabHeavy, Icons.Default.Star, "tab_heavy_button"),
                             NavigationItem(strings.tabUninstall, Icons.Default.Settings, "tab_uninstall_button")
                         )
 
@@ -267,7 +273,7 @@ fun ShieldApp(viewModel: ShieldViewModel) {
                             strings = strings,
                             isAccessibilityEnabled = isAccessibilityEnabled,
                             remainingMs = remainingMs,
-                            isShieldActive = settings?.isShieldActive == true && remainingMs > 0,
+                            isShieldActive = (settings?.isShieldActive == true && remainingMs > 0) || (settings?.isStrictMonthActive == true && strictRemainingMs > 0),
                             selectedHours = selectedHours,
                             selectedMinutes = selectedMinutes,
                             selectedSeconds = selectedSeconds,
@@ -281,12 +287,18 @@ fun ShieldApp(viewModel: ShieldViewModel) {
                             },
                             focusManager = focusManager
                         )
-                        1 -> UninstallSectionScreen(
+                        1 -> StrictMonthSectionScreen(
+                            viewModel = viewModel,
+                            strings = strings,
+                            strictRemainingMs = strictRemainingMs,
+                            isStrictActive = settings?.isStrictMonthActive == true && strictRemainingMs > 0
+                        )
+                        2 -> UninstallSectionScreen(
                             viewModel = viewModel,
                             strings = strings,
                             isDeviceAdminEnabled = isDeviceAdminEnabled,
                             adminRemainingMs = adminRemainingMs,
-                            isAdminLockActive = settings?.isAdminLockActive == true && adminRemainingMs > 0,
+                            isAdminLockActive = (settings?.isAdminLockActive == true && adminRemainingMs > 0) || (settings?.isStrictMonthActive == true && strictRemainingMs > 0),
                             selectedDays = selectedDays,
                             onDaysChange = { selectedDays = it }
                         )
@@ -522,19 +534,22 @@ fun GuardSectionScreen(
                 Button(
                     onClick = {
                         if (isShieldActive) {
-                            viewModel.deactivateShield()
+                            // Manual deactivation is strictly forbidden while timer is active
                         } else {
                             val totalMs = (selectedHours * 3600L + selectedMinutes * 60L + selectedSeconds) * 1000L
                             viewModel.activateShield(maxOf(1000L, totalMs))
                         }
                     },
+                    enabled = !isShieldActive,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
                         .testTag("primary_action_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isShieldActive) ElegantDarkBg else ElegantButtonPurple,
-                        contentColor = if (isShieldActive) ElegantTextLight else ElegantButtonText
+                        containerColor = if (isShieldActive) ElegantCardBg else ElegantButtonPurple,
+                        contentColor = if (isShieldActive) ElegantTextMuted else ElegantButtonText,
+                        disabledContainerColor = ElegantCardBg,
+                        disabledContentColor = ElegantTextMuted
                     ),
                     shape = RoundedCornerShape(28.dp),
                     border = if (isShieldActive) BorderStroke(1.dp, ElegantBorder) else null
@@ -542,7 +557,8 @@ fun GuardSectionScreen(
                     Text(
                         text = if (isShieldActive) strings.btnDeactivate else strings.btnActivate,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
@@ -573,6 +589,7 @@ fun GuardSectionScreen(
                 OutlinedTextField(
                     value = userKeywordInput,
                     onValueChange = onKeywordInputChange,
+                    enabled = !isShieldActive,
                     placeholder = { Text("secret_word, badsite, etc.", color = ElegantTextMuted) },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -582,7 +599,9 @@ fun GuardSectionScreen(
                         unfocusedBorderColor = ElegantBorder,
                         focusedTextColor = ElegantTextLight,
                         unfocusedTextColor = ElegantTextLight,
-                        cursorColor = ElegantAccentPurple
+                        cursorColor = ElegantAccentPurple,
+                        disabledTextColor = ElegantTextMuted,
+                        disabledBorderColor = ElegantBorder.copy(alpha = 0.5f)
                     ),
                     shape = RoundedCornerShape(12.dp)
                 )
@@ -903,7 +922,8 @@ fun UninstallSectionScreen(
                                 count = 30,
                                 isShieldActive = false,
                                 selectedIndex = selectedDays - 1,
-                                onIndexSelected = { onDaysChange(it + 1) }
+                                onIndexSelected = { onDaysChange(it + 1) },
+                                labelProvider = { String.format(java.util.Locale.US, "%02d", it + 1) }
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
@@ -1011,7 +1031,8 @@ fun WheelPicker(
     isShieldActive: Boolean,
     selectedIndex: Int,
     onIndexSelected: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    labelProvider: (Int) -> String = { String.format(java.util.Locale.US, "%02d", it) }
 ) {
     val lazyListState = rememberLazyListState()
     val density = LocalDensity.current
@@ -1091,13 +1112,178 @@ fun WheelPicker(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = String.format(java.util.Locale.US, "%02d", index),
+                        text = labelProvider(index),
                         color = textColor.copy(alpha = itemAlpha),
                         fontSize = 20.sp,
                         fontWeight = if (isSelected) FontWeight.Black else FontWeight.Normal,
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.scale(fontScale)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun StrictMonthSectionScreen(
+    viewModel: ShieldViewModel,
+    strings: AppStrings,
+    strictRemainingMs: Long,
+    isStrictActive: Boolean
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 100.dp)
+    ) {
+        // PANEL: Star/Shield status container
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = if (isStrictActive) ShieldCrimson else ElegantBorder,
+                        shape = RoundedCornerShape(32.dp)
+                    )
+                    .background(if (isStrictActive) ShieldCrimson.copy(alpha = 0.08f) else ElegantCardBg, RoundedCornerShape(32.dp))
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(88.dp)
+                        .background(
+                            if (isStrictActive) ShieldCrimson.copy(alpha = 0.12f) else ElegantDarkBg,
+                            shape = CircleShape
+                        )
+                        .border(1.dp, if (isStrictActive) ShieldCrimson.copy(alpha = 0.4f) else ElegantBorder, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Strict month shield status icon",
+                        tint = if (isStrictActive) ShieldCrimson else ElegantTextMuted,
+                        modifier = Modifier.size(44.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = if (isStrictActive) strings.heavyStatusActive else strings.heavyStatusInactive,
+                    color = if (isStrictActive) ShieldCrimson else ElegantTextLight,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    letterSpacing = 0.5.sp,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (isStrictActive) {
+                    // Display highly precise countdown: Days, Hours, Minutes, Seconds
+                    val totalSecs = strictRemainingMs / 1000
+                    val days = totalSecs / 86400
+                    val hours = (totalSecs % 86400) / 3600
+                    val minutes = (totalSecs % 3600) / 60
+                    val seconds = totalSecs % 60
+
+                    val countdownFormatted = String.format(
+                        java.util.Locale.US,
+                        "%02d %s %02d:%02d:%02d",
+                        days,
+                        strings.daysLabel,
+                        hours,
+                        minutes,
+                        seconds
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = strings.heavyLockCountdownLabel,
+                            color = ElegantTextMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(ShieldCrimson.copy(alpha = 0.05f), RoundedCornerShape(16.dp))
+                                .border(1.dp, ShieldCrimson.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = countdownFormatted,
+                                fontSize = 20.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Black,
+                                color = ShieldCrimson
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Educational & Motivational Recovery Message
+                        Text(
+                            text = strings.heavyLockNotice,
+                            color = ShieldCrimson.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 16.sp
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = strings.heavyDesc,
+                            color = ElegantTextMuted,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            textAlign = TextAlign.Justify
+                        )
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        Button(
+                            onClick = {
+                                viewModel.activateStrictMonth()
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .testTag("activate_heavy_protocol_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ShieldCrimson,
+                                contentColor = ElegantButtonText
+                            ),
+                            shape = RoundedCornerShape(28.dp)
+                        ) {
+                            Text(
+                                text = strings.btnActivateHeavy,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -1,37 +1,77 @@
-name: Android CI/CD Build
+name: Android CI/CD Build & Release
 
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch: # Allows manually triggering the build from the Actions tab
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: Build & Package APK
+    name: Build & Auto-Release
     runs-on: ubuntu-latest
-    env:
-      STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Decode Debug Keystore
         run: |
           if [ -f "debug.keystore.base64" ]; then
             echo "Decoding debug keystore..."
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -d debug.keystore.base64 > debug.keystore || rm -f debug.keystore
+          fi
+          if [ ! -f "debug.keystore" ]; then
+            echo "debug.keystore not found or decode failed. Generating a new debug keystore..."
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Configure Keystore Signing (Resilient Fallback)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD_SECRET: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          # If custom keystore base64 is provided as secret, decode it. Otherwise, generate a custom upload key for the release configuration.
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Decoding repository release keystore..."
+            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "STORE_PASSWORD=$STORE_PASSWORD_SECRET" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=$KEY_PASSWORD_SECRET" >> $GITHUB_ENV
           else
-            echo "No debug.keystore.base64 found. Running fallback."
+            echo "Repository release secrets not configured. Generating self-signed release fallback..."
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=Shield Blocker Upload,O=Shield Blocker,C=US"
+            echo "STORE_PASSWORD=android" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=android" >> $GITHUB_ENV
           fi
 
       - name: Set up environment files
@@ -46,45 +86,90 @@ jobs:
             fi
           fi
 
-      - name: Clean and Restore Gradle Wrapper
-        run: |
-          echo "Cleaning up possibly corrupted wrapper jar..."
-          rm -f gradle/wrapper/gradle-wrapper.jar
-          
-          echo "Downloading authentic, clean Gradle Wrapper jar from Gradle's official repository..."
-          mkdir -p gradle/wrapper
-          curl -sSLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar || {
-            echo "Direct download failed. Falling back to local gradle wizard..."
-            gradle wrapper --gradle-version 9.3.1
-          }
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-overwrite-existing: true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+      - name: Run JVM Unit Tests
+        run: ./gradlew testDebugUnitTest
 
-      - name: Build Release APK (Conditional)
+      - name: Compile Debug and Release Targets
         env:
-          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ env.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
         run: |
-          if [ "$STORE_PASSWORD" != "" ]; then
-            ./gradlew assembleRelease
-          else
-            echo "Release credentials not configured. Skipping Release build."
-          fi
+          ./gradlew assembleDebug
+          ./gradlew assembleRelease
+          ./gradlew bundleRelease
 
-      - name: Upload Debug APK
+      - name: Organize Build Outputs for Release
+        run: |
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/ShieldBlocker-Debug.apk
+          cp app/build/outputs/apk/release/app-release.apk release-artifacts/ShieldBlocker-Release.apk
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/ShieldBlocker-Release.aab
+
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Shield-Blocker-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ShieldBlocker-Debug-APK
+          path: release-artifacts/ShieldBlocker-Debug.apk
 
-      - name: Upload Release APK
-        if: ${{ env.STORE_PASSWORD != '' }}
+      - name: Upload Release APK & Bundle Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Shield-Blocker-Release-APK
-          path: app/build/outputs/apk/release/app-release.apk
+          name: ShieldBlocker-Release-Package
+          path: |
+            release-artifacts/ShieldBlocker-Release.apk
+            release-artifacts/ShieldBlocker-Release.aab
+
+      - name: Create Rolling Pre-Release for Main Branch
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Continuous Build (Bleeding Edge)"
+          body: |
+            This is an automated continuous integration pre-release built directly from the latest push on the `${{ github.ref_name }}` branch.
+            
+            **Commit Hash:** `${{ github.sha }}`
+            **Build Time:** ${{ github.event.head_commit.timestamp || 'N/A' }}
+            
+            Install `ShieldBlocker-Release.apk` directly on your Android device to test the newest features immediately.
+          prerelease: true
+          draft: false
+          files: |
+            release-artifacts/ShieldBlocker-Debug.apk
+            release-artifacts/ShieldBlocker-Release.apk
+            release-artifacts/ShieldBlocker-Release.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Formal GitHub Version Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Shield Blocker ${{ github.ref_name }}"
+          body: |
+            ## Shield Blocker Official Release (${{ github.ref_name }})
+            
+            We are pleased to publish the official release of Shield Blocker.
+            
+            ### Included Release Packages
+            * **ShieldBlocker-Release.apk**: Production signed Android Application Package (ready for direct device installation).
+            * **ShieldBlocker-Release.aab**: Android App Bundle format (optimized and aligned for Google Play Store upload).
+            * **ShieldBlocker-Debug.apk**: Complete debug target package with full active telemetry and debugging logs enabled.
+            
+            *Verify signatures and SHA-256 integrity check hashes in your terminal if required.*
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/ShieldBlocker-Debug.apk
+            release-artifacts/ShieldBlocker-Release.apk
+            release-artifacts/ShieldBlocker-Release.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

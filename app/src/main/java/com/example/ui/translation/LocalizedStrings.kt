@@ -39,19 +39,27 @@ data class AppStrings(
     val customKeywordsDesc: String,
     val helpSection: String,
     val helpContent: String,
+    val tabHeavy: String,
+    val heavyTitle: String,
+    val heavyDesc: String,
+    val btnActivateHeavy: String,
+    val heavyStatusActive: String,
+    val heavyStatusInactive: String,
+    val heavyLockCountdownLabel: String,
+    val heavyLockNotice: String,
     val textDirection: LayoutDirection
 )
 
 object LocalizedStrings {
     val English = AppStrings(
-        title = "Shield Blocker",
+        title = "SecureShield",
         subtitle = "Local Content Filtering & Anti-Porn Protection",
         tabGuard = "Content Shield",
         tabUninstall = "Uninstall Lock",
         statusActive = "SHIELD SECURED",
         statusInactive = "SHIELD INACTIVE",
         btnActivate = "Activate Shield",
-        btnDeactivate = "Deactivate Shield",
+        btnDeactivate = "Shield Locked (No Deactivation allowed)",
         durationSelector = "Select Shield Duration",
         permissionDesc = "Accessibility access is required for real-time local web & text closure. Without this, the app cannot scan pages to trigger immediate home redirects.",
         btnGrantPermission = "Grant Web-Scan Permission",
@@ -79,19 +87,27 @@ object LocalizedStrings {
         customKeywordsTitle = "Scrutiny Word Filter List",
         customKeywordsDesc = "Add extra comma-separated search tags or blocking keywords:",
         helpSection = "Technical Guidance",
-        helpContent = "Shield Blocker operates entirely offline. It uses standard Android Accessibility hooks to recursively analyze display tree node hierarchies and address bar URLs. If an inappropriate match is registered, the system fires an instantaneous HOME event. Additionally, our secure administration lock blocks settings entry, allowing you to secure your device from accidental or unauthorized app deletions.",
+        helpContent = "SecureShield operates entirely offline. It uses standard Android Accessibility hooks to recursively analyze display tree node hierarchies and address bar URLs. If an inappropriate match is registered, the system fires an instantaneous HOME event. Additionally, our secure administration lock blocks settings entry, allowing you to secure your device from accidental or unauthorized app deletions.",
+        tabHeavy = "Strict Month",
+        heavyTitle = "30-Day Anti-Relapse Heavy Shield",
+        heavyDesc = "This is a specialized protocol designed for individuals struggling with daily habits or sudden urges. Activating this option will trigger a 100% UN-BYPASSABLE block that keeps the Content Shield and Uninstall Protections completely locked for exactly 30 days. No manual deactivations, settings bypasses, or service stops are permitted until the month finishes.",
+        btnActivateHeavy = "Activate 30-Day Heavy Protocol",
+        heavyStatusActive = "HEAVY PROTOCOL ACTIVATED",
+        heavyStatusInactive = "HEAVY PROTOCOL INACTIVE",
+        heavyLockCountdownLabel = "Strict Protocol Remaining Block Time:",
+        heavyLockNotice = "Warning: The heavy-duty shield is fully locked. Manual deactivation is strictly prohibited by security constraints for the rest of this month.",
         textDirection = LayoutDirection.Ltr
     )
 
     val Arabic = AppStrings(
-        title = "حاجب الدروع",
+        title = "الدرع الآمن",
         subtitle = "تصفية وحماية محلية ضد الإباحية",
         tabGuard = "درع الحماية",
         tabUninstall = "حماية الحذف",
         statusActive = "درع الحظر مفعل ومؤمن",
         statusInactive = "درع الحظر معطل الآن",
         btnActivate = "تفعيل درع الحماية",
-        btnDeactivate = "إيقاف تفعيل الدرع",
+        btnDeactivate = "الدرع مؤمن ومقفل (غير قابل للإلغاء)",
         durationSelector = "تحديد مدة قفل الحظر",
         permissionDesc = "صلاحية الوصول (Accessibility) مطلوبة لتمكين التطبيق من فحص الشاشة وإغلاق النوافذ الإباحية فورياً وتلقائياً. يرجى تفعيلها لضمان الحماية.",
         btnGrantPermission = "منح صلاحية فحص الروابط",
@@ -119,7 +135,15 @@ object LocalizedStrings {
         customKeywordsTitle = "قائمة الكلمات المفتاحية للتدقيق",
         customKeywordsDesc = "أضف كلمات تصفية إضافية مفصولة بفواصل (أجنبية أو عربية):",
         helpSection = "دليل الاستخدام الفني والتعليمات",
-        helpContent = "يعمل حاجب الدروع محلياً بالكامل. يراقب التطبيق النصوص المفتوحة في المتصفحات ومواقع التواصل، وعند اكتشاف أي كلمة إباحية، يتم إرجاعك تلقائياً للشاشة الرئيسية لحمايتك. كما تمنع حماية مشرف الجهاز قفل الإعدادات ومعلومات التطبيق طوال فترة العد التنازلي للتأكد من عدم حذفه أو تخطيه.",
+        helpContent = "يعمل تطبيق الدرع الآمن محلياً بالكامل. يراقب التطبيق النصوص المفتوحة في المتصفحات ومواقع التواصل، وعند اكتشاف أي كلمة إباحية، يتم إرجاعك تلقائياً للشاشة الرئيسية لحمايتك. كما تمنع حماية مشرف الجهاز قفل الإعدادات ومعلومات التطبيق طوال فترة العد التنازلي للتأكد من عدم حذفه أو تخطيه.",
+        tabHeavy = "البروتوكول الصارم",
+        heavyTitle = "بروتوكول الـ 30 يوماً المضاد للانتكاس الصارم",
+        heavyDesc = "هذا بروتوكول متقدم مخصص للأشخاص الذين يعانون من العادات اليومية أو الرغبات المفاجئة الملحة. تفعيل هذا الخيار سيطلق حظراً شاملاً ومؤمناً بنسبة 100%، يحافظ على درع الحماية وحظر الحذف مقفلين بالكامل لمدة 30 يوماً متواصلة. لن تتمكن أبداً من إيقاف الخدمة، إلغاء الدرع، أو تعديل مشرف الجهاز حتى ينتهي الشهر بالكامل.",
+        btnActivateHeavy = "تفعيل بروتوكول الـ 30 يوماً الصارم",
+        heavyStatusActive = "بروتوكول الحظر الصارم نشط ومؤمن",
+        heavyStatusInactive = "بروتوكول الحظر الصارم غير مفعل",
+        heavyLockCountdownLabel = "المتبقي على انتهاء بروتوكول الحماية الصارمة:",
+        heavyLockNotice = "تحذير: بروتوكول الحظر الصارم مفعل ومقفل بالكامل. إلغاء التفعيل اليدوي محظور تماماً بموجب قيود النظام الصارمة طوال هذا الشهر.",
         textDirection = LayoutDirection.Rtl
     )
 }

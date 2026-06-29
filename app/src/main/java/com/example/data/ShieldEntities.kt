@@ -23,5 +23,7 @@ data class ShieldSettings(
     val language: String = "en",
     val isAdminLockActive: Boolean = false,
     val adminLockEndTimestampMs: Long = 0L,
-    val adminLockDurationDays: Int = 0
+    val adminLockDurationDays: Int = 0,
+    val isStrictMonthActive: Boolean = false,
+    val strictMonthEndTimestampMs: Long = 0L
 )
